@@ -1,18 +1,23 @@
-from rest_framework import generics, permissions
-from .models import Post
-from .serializers import PostCreateSerializer
-from .utils import extract_text_from_file
-from .blockchain_utils import save_to_blockchain, is_hash_recorded
+from rest_framework import generics, permissions, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
-import hashlib, json
-import numpy as np
+from django.http import FileResponse
+from django.shortcuts import get_object_or_404
+from django.core.exceptions import PermissionDenied
+from django.conf import settings
+from .models import Post, Comment, Vote
+from .serializers import PostCreateSerializer, CommentSerializer
+from .utils import extract_text_from_file
+from .blockchain_utils import save_to_blockchain
+from .pdf_utils import generate_report_pdf
 from sentence_transformers import SentenceTransformer, util
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+import hashlib, json, numpy as np, os
+
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
+
 
 class PostCreateView(generics.CreateAPIView):
     queryset = Post.objects.all()
@@ -69,7 +74,7 @@ class PostCreateView(generics.CreateAPIView):
                     sim = float(util.cos_sim(new_embedding, existing_tensor).item())
                     if sim > max_sim:
                         max_sim = sim
-                except Exception as e:
+                except Exception:
                     continue
 
             similarity = round(max_sim, 4)
@@ -88,18 +93,11 @@ class PostCreateView(generics.CreateAPIView):
             embedding=embedding
         )
 
-        # Сохраняем в "блокчейн"
         save_to_blockchain(sha256_hash, self.request.user.username, serializer.validated_data.get('title'))
 
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from .models import Post
-
-
 class PostVerifyView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         hash_to_check = request.query_params.get('hash')
@@ -107,7 +105,6 @@ class PostVerifyView(APIView):
             return Response({"error": "Hash parameter is required."}, status=400)
 
         post = Post.objects.filter(sha256_hash=hash_to_check).order_by('-created_at').first()
-
 
         if post:
             return Response({
@@ -119,17 +116,9 @@ class PostVerifyView(APIView):
             })
         return Response({"exists": False})
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.http import FileResponse, Http404
-from django.conf import settings
-from .models import Post
-from .pdf_utils import generate_report_pdf
-import os
 
 class PostReportView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         hash_to_check = request.query_params.get("hash")
@@ -140,15 +129,76 @@ class PostReportView(APIView):
         if not post:
             return Response({"error": "Report not found. Try re-uploading the post."}, status=404)
 
-        # Путь к PDF
-        import os
-        from django.conf import settings
-
         pdf_path = os.path.join(settings.MEDIA_ROOT, "reports", f"report_{post.sha256_hash}.pdf")
 
-        # Генерация, если не существует
         if not os.path.exists(pdf_path):
             generate_report_pdf(post)
 
-        #  Отдаём файл
         return FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
+
+
+class PostDeleteView(generics.DestroyAPIView):
+    queryset = Post.objects.all()
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_destroy(self, instance):
+        if instance.user != self.request.user:
+            raise PermissionDenied("Вы можете удалять только свои посты.")
+        instance.delete()
+
+
+class PostVoteView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        post = get_object_or_404(Post, pk=pk)
+        Vote.objects.get_or_create(user=request.user, post=post)
+        return Response({"message": "Vote added"})
+
+
+class PostCommentsListView(generics.ListAPIView):
+    serializer_class = CommentSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        post_id = self.kwargs['pk']
+        return Comment.objects.filter(post_id=post_id)
+
+
+class PostCommentCreateView(generics.CreateAPIView):
+    serializer_class = CommentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_create(self, serializer):
+        post = get_object_or_404(Post, pk=self.kwargs['pk'])
+        serializer.save(post=post, user=self.request.user)
+
+
+class CommentUpdateView(generics.UpdateAPIView):
+    queryset = Comment.objects.all()
+    serializer_class = CommentSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_update(self, serializer):
+        if self.get_object().user != self.request.user:
+            raise PermissionDenied("Вы можете редактировать только свои комментарии.")
+        serializer.save()
+
+
+class CommentDeleteView(generics.DestroyAPIView):
+    queryset = Comment.objects.all()
+    permission_classes = [permissions.IsAuthenticated]
+
+    def perform_destroy(self, instance):
+        if instance.user != self.request.user:
+            raise PermissionDenied("Вы можете удалять только свои комментарии.")
+        instance.delete()
+
+from rest_framework import generics
+from .models import Post
+from .serializers import PostCreateSerializer
+
+class PostListView(generics.ListAPIView):
+    queryset = Post.objects.all().order_by('-created_at')
+    serializer_class = PostCreateSerializer
+    permission_classes = [permissions.AllowAny]  # или IsAuthenticated если нужно

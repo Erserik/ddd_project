@@ -22,3 +22,15 @@ class PostCreateSerializer(serializers.ModelSerializer):
         elif post_type not in ['text', 'image', 'document']:
             raise serializers.ValidationError("Недопустимый тип поста.")
         return data
+
+# serializers.py
+
+from .models import Vote, Comment
+
+class CommentSerializer(serializers.ModelSerializer):
+    user = serializers.StringRelatedField(read_only=True)
+
+    class Meta:
+        model = Comment
+        fields = ['id', 'user', 'text', 'created_at']
+        read_only_fields = ['user', 'created_at']
